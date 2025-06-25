@@ -1,24 +1,25 @@
 
 
-module I2C_Controller(clock, reset_n, init, rw, address, data, bytesend, i2c_err, i2c_sda, i2c_scl);
+module I2C_Controller(clock, reset_n, init, recog_address, allow_target, rw, address, data, bytesend, i2c_err, data_out, s_i2c_sda, s_i2c_scl, i2c_sda, i2c_scl);
 	parameter ADDR_SIZE = 7;
 	parameter CLOCK_F = 50_000_000;
 
-	input clock, reset_n, init, rw;
-	input [ADDR_SIZE-1:0] address;
+	input clock, reset_n, init, allow_target, rw;
+	input [ADDR_SIZE-1:0] address, recog_address;
 	input [31:0] data;
 	input [3:0] bytesend;
+
 	inout i2c_sda, i2c_scl;
 
+	inout s_i2c_sda, s_i2c_scl;
+
+	output [31:0] data_out;
 
 	output i2c_err;
 
 	reg [3:0] state, state_n;
 	
 	reg i2c_sda_r, i2c_scl_r;
-
-	reg [31:0] stored_data, stored_data_n;
-	reg [7:0] shift_register, shift_register_n;
 
 	wire cycle_counter_en, cycle_counter_clear;
 	wire [7:0] cycle_counter_out;
@@ -35,29 +36,60 @@ module I2C_Controller(clock, reset_n, init, rw, address, data, bytesend, i2c_err
 	wire data_reg_load, data_reg_shift;
 	wire [31:0] data_reg_out;
 
-	wire data_out_reg_load, data_out_reg_shift;
+	wire data_out_reg_load, data_out_reg_shift, data_out_reg_in_shift;
 	wire [7:0] data_out_data, data_out_reg_out;
+
+
+	wire data_in_load, data_in_shift;
 
 	wire shift_reg_load;
 	wire shift_reg_out;
 
+	wire spd_out;
 
 	wire i2c_sda_driver_en, i2c_scl_driver_en;
 
-	start_pulse_detector spd(clock, reset_n, i2c_sda, spd_out);
+	wire i2c_s_sda_driver_en, i2c_s_scl_driver_en;
+
+	start_pulse_detector spd(clock, reset_n, s_i2c_sda, spd_out);
 
 	register #(32) data_reg(clock, reset_n, data_reg_load, data, data_reg_out);
 	register #(1) rw_reg(clock, reset_n, rw_reg_load, rw, rw_reg_out);
 	register #(1) shift_reg(clock, reset_n, shift_reg_load, data_out_reg_out[7], shift_reg_out);
-	shift_register #(4) bytesend_reg(clock, reset_n, bytesend_reg_load, bytesend_reg_shift, bytesend, bytesend_reg_out);
-	shift_register data_out_reg(clock, reset_n, data_out_reg_load, data_out_reg_shift, data_out_data, data_out_reg_out);
 
+
+	shift_register #(4) bytesend_reg(clock,
+									 reset_n,
+									 bytesend_reg_load,
+									 1'b0,
+									 1'bz,
+									 bytesend_reg_shift,
+									 bytesend,
+									 bytesend_reg_out);
+	
+	shift_register data_out_reg(clock,
+								reset_n,
+								data_out_reg_load,
+								1'b0,
+								1'bz,
+								data_out_reg_shift,
+								data_out_data,
+								data_out_reg_out);
+	
+	shift_register #(32) data_in_reg(clock,
+									 reset_n,
+									 data_in_load,
+									 data_in_shift,
+									 s_i2c_sda,
+									 1'b0,
+									 32'd0,
+									 data_out);
 
 	counter cycle_counter(clock, cycle_counter_clear, cycle_counter_en, cycle_counter_out);
 	counter send_counter(clock, send_counter_en, send_counter_en, send_counter_out);
 
 	
-	localparam START_COUNT_F = 250_000;
+	localparam START_STOP_COUNT_F = 250_000;
 	
 	localparam STATE_IDLE 			= 4'd0,
 			   STATE_INIT 			= 4'd1,
@@ -66,10 +98,15 @@ module I2C_Controller(clock, reset_n, init, rw, address, data, bytesend, i2c_err
 			   STATE_T_SEND_DATA 	= 4'd4,
 			   STATE_R_SEND_DATA 	= 4'd6,
 			   STATE_I_WAIT_ACK		= 4'd7,
-			   STATE_ERR			= 4'd8,
-			   STATE_STOP 			= 4'd9;
+			   STATE_R_CHECK_ADDR	= 4'd8,
+			   STATE_S_SEND_DATA 	= 4'd9,
+			   STATE_S_RECV_DATA	= 4'd10,
+			   STATE_ACK_ADDR 		= 4'd11,
+			   STATE_NACK 			= 4'd12,
+			   STATE_ERR			= 4'd14,
+			   STATE_STOP 			= 4'd15;
 	
-	localparam START_COUNT = (CLOCK_F / START_COUNT_F) - 1;
+	localparam START_STOP_COUNT = (CLOCK_F / START_STOP_COUNT_F) - 1;
 
 	/* sequential logic */
 	always @(posedge clock) begin
@@ -88,12 +125,15 @@ module I2C_Controller(clock, reset_n, init, rw, address, data, bytesend, i2c_err
 				if (init) begin
 					state_n = STATE_INIT;
 				end
+				else if (spd_out && s_i2c_scl) begin
+					state_n = STATE_CHECK_ADDR;
+				end
 				else begin
 					state_n = STATE_IDLE;
 				end
 			end
 			STATE_INIT: begin
-				if (cycle_counter_out == START_COUNT) begin
+				if (cycle_counter_out == START_STOP_COUNT) begin
 					state_n = STATE_SEND_ADDR;
 				end
 				else begin
@@ -113,7 +153,6 @@ module I2C_Controller(clock, reset_n, init, rw, address, data, bytesend, i2c_err
 					state_n = STATE_ERR;
 				end
 				else begin
-					
 					state_n = rw_reg_out ? STATE_T_SEND_DATA : STATE_R_SEND_DATA;
 				end
 			end
@@ -125,6 +164,29 @@ module I2C_Controller(clock, reset_n, init, rw, address, data, bytesend, i2c_err
 			end
 			STATE_I_WAIT_ACK: begin
 				state_n = STATE_I_WAIT_ACK;
+			end
+			STATE_ERR: begin
+				state_n = STATE_STOP;
+			end
+			STATE_CHECK_ADDR: begin
+				if (send_counter_out == 8'd8) begin 
+					if (recog_address == data_out_reg_out[7:1]) state_n = allow_target ? STATE_ACK_ADDR : STATE_NACK;
+					else state_n = STATE_NACK;
+				end
+				else begin
+					state_n = STATE_CHECK_ADDR;
+				end
+			end
+			STATE_ACK_ADDR: begin
+
+			end
+			STATE_STOP: begin
+				if (cycle_counter_out == START_STOP_COUNT) begin
+					state_n = STATE_IDLE;
+				end
+				else begin
+					state_n = STATE_STOP;
+				end
 			end
 			default: state_n = 1'bx;
 		endcase
@@ -154,6 +216,14 @@ module I2C_Controller(clock, reset_n, init, rw, address, data, bytesend, i2c_err
 				i2c_sda_r = 1'b1; //1'bx
 				i2c_scl_r = clock;
 			end
+			STATE_ERR: begin
+				i2c_sda_r = 1'b0;
+				i2c_scl_r = clock;
+			end
+			STATE_STOP: begin
+				i2c_sda_r = 1'b0;
+				i2c_scl_r = 1'b1;
+			end
 		endcase
 	end
 
@@ -167,20 +237,26 @@ module I2C_Controller(clock, reset_n, init, rw, address, data, bytesend, i2c_err
 	assign bytesend_reg_shift 	= 1'b0;
 
 
+	assign data_in_load 		= ((state == STATE_IDLE) | (state == STATE_ACK_ADDR) | (state == STACK_NACK));
+	assign data_in_shift 		= ((state == STATE_CHECK_ADDR) & s_i2c_scl);
 
-	assign cycle_counter_clear = (state == STATE_INIT);
-	assign send_counter_clear = ((state == STATE_SEND_ADDR) | (state == STATE_T_SEND_DATA));
+	assign cycle_counter_clear 	= ((state == STATE_INIT) | (state == STATE_STOP));
+	assign send_counter_clear 	= ((state == STATE_SEND_ADDR) | (state == STATE_T_SEND_DATA));
 
-	assign cycle_counter_en = (state == STATE_INIT);
-	assign send_counter_en 	= ((state == STATE_SEND_ADDR) | (state == STATE_T_SEND_DATA));
+	assign cycle_counter_en 	= ((state == STATE_INIT) | (state == STATE_STOP));
+	assign send_counter_en 		= ((state == STATE_SEND_ADDR) | (state == STATE_T_SEND_DATA));
 
-	assign data_out_data = (state == STATE_IDLE) ? ({address, rw}) : (data_reg_out);
+	assign data_out_data 		= (state == STATE_IDLE) ? ({address, rw}) : (data_reg_out);
 
-	assign i2c_sda_driver_en = (state != STATE_WAIT_ACK);
-	assign i2c_scl_driver_en = 1'b1;
+	assign i2c_sda_driver_en 	= ((state != STATE_IDLE) | (state != STATE_WAIT_ACK));
+	assign i2c_scl_driver_en 	= 1'b1;
 
 	bidir_driver i2c_sda_driver(i2c_sda_driver_en, i2c_sda_r, i2c_sda);
 	bidir_driver i2c_scl_driver(i2c_scl_driver_en, i2c_scl_r, i2c_scl);
+
+
+	bidir_driver i2c_s_sda_driver(i2c_s_sda_driver_en, s_i2c_sda_r, s_i2c_sda);
+	bidir_driver i2c_s_scl_driver(i2c_s_scl_driver_en, s_i2c_scl_r, s_i2c_scl);
 
 	assign i2c_err = (state == STATE_ERR);
 	//assign i2c_sda = i2c_sda_r;

@@ -1,8 +1,8 @@
 
-module shift_register(clock, reset_n, load, shift, ins, out);
+module shift_register(clock, reset_n, load, in_shift, inb, shift, ins, out);
 	parameter REGISTER_SIZE = 8;
 
-	input clock, reset_n, load, shift;
+	input clock, reset_n, load, in_shift, shift, inb;
 
 	input [REGISTER_SIZE-1:0] ins;
 
@@ -26,6 +26,9 @@ module shift_register(clock, reset_n, load, shift, ins, out);
 		end
 		else if (shift) begin
 			out_n = {out[REGISTER_SIZE-2:0], 1'b0};
+		end
+		else if (in_shift) begin
+			out_n = {out[REGISTER_SIZE-2:0], inb};
 		end
 		else begin
 			out_n = out;
