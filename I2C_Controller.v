@@ -1,6 +1,6 @@
 
 `define MAX(a,b) ((a > b) ? a : b)
-module I2C_Controller(clock, reset_n, init_transaction, rw, address, data, bytesend, i2c_sda, i2c_scl);
+module I2C_Controller(clock, reset_n, init_transaction, rw, address, data, bytesend, i2c_sda, i2c_scl, debug_signal, debug_send);
 	parameter CLOCK_F 		= 50_000_000;
 
 	localparam INIT_COUNT 	= (CLOCK_F / 250_000) - 1;
@@ -17,6 +17,8 @@ module I2C_Controller(clock, reset_n, init_transaction, rw, address, data, bytes
 
 
 	inout i2c_sda, i2c_scl;
+
+	output debug_signal, debug_send;
 
 	wire data_register_load, data_register_inb, data_register_outb, data_register_shift;
 	wire [39:0] data_register_ins, data_register_out;
@@ -87,12 +89,13 @@ module I2C_Controller(clock, reset_n, init_transaction, rw, address, data, bytes
 	localparam 	STATE_IDLE 		= 4'd0,
 				STATE_INIT		= 4'd1,
 				STATE_SEND_ADDR	= 4'd2,
-				STATE_ADDR_ACK	= 4'd3,
+				STATE_ACK_ADDR	= 4'd3,
 				STATE_RW		= 4'd4,
 				STATE_SEND_DATA = 4'd5,
 				STATE_RECV_DATA	= 4'd6,
-				STATE_ACK_DATA	= 4'd7,
-				STATE_STOP		= 4'd8;
+				STATE_FINI_DATA = 4'd7,
+				STATE_ACK_DATA	= 4'd8,
+				STATE_STOP		= 4'd9;
 
 
 	reg [3:0] state, state_n;
@@ -108,13 +111,15 @@ module I2C_Controller(clock, reset_n, init_transaction, rw, address, data, bytes
 		case (state)
 			STATE_IDLE: state_n = init_transaction ? STATE_INIT : STATE_IDLE;
 			STATE_INIT:	state_n = (i2c_counter_out == INIT_COUNT) ? STATE_SEND_ADDR : STATE_INIT;
-			STATE_SEND_ADDR: state_n = (data_counter_out == SEND_COUNT) ? STATE_ADDR_ACK : STATE_SEND_ADDR;
-			STATE_ADDR_ACK:	state_n = (i2c_sda == 1'b1) ? STATE_STOP : STATE_RW;
+			STATE_SEND_ADDR: state_n = (data_counter_out == SEND_COUNT) ? STATE_ACK_ADDR : STATE_SEND_ADDR;
+			STATE_ACK_ADDR:	state_n = ((i2c_sda == 1'b1) & clk_det2_out) ? STATE_STOP : (clk_det2_out ? STATE_RW : STATE_ACK_ADDR);
 			STATE_RW: state_n = (rw_register_out ? STATE_SEND_DATA : STATE_RECV_DATA);
-			STATE_SEND_DATA: state_n = (data_counter_out == SEND_COUNT) ? STATE_ACK_DATA : STATE_SEND_DATA;
-			STATE_RECV_DATA: state_n = (data_counter_out == SEND_COUNT) ? STATE_ACK_DATA : STATE_RECV_DATA;
-			STATE_ACK_DATA: state_n = (i2c_sda == 1'b1) ? STATE_STOP : 
-									  	(bytesend_register_out == 4'd0) ? STATE_STOP : STATE_RW;
+			STATE_SEND_DATA: state_n = (data_counter_out == SEND_COUNT) ? STATE_FINI_DATA : STATE_SEND_DATA;
+			STATE_RECV_DATA: state_n = (data_counter_out == SEND_COUNT) ? STATE_FINI_DATA : STATE_RECV_DATA;
+			STATE_FINI_DATA: state_n = STATE_ACK_DATA;
+			STATE_ACK_DATA: state_n = ((i2c_sda == 1'b1) & clk_det2_out) ? STATE_STOP : 
+									  	((bytesend_register_out == 4'd0) & clk_det2_out) ? STATE_STOP : 
+									  		clk_det2_out ? STATE_RW : STATE_ACK_DATA;
   			STATE_STOP: state_n = (i2c_counter_out == INIT_COUNT) ? STATE_IDLE : STATE_STOP;
 			default: state_n = 4'bxxxx;
 		endcase
@@ -128,7 +133,7 @@ module I2C_Controller(clock, reset_n, init_transaction, rw, address, data, bytes
 	assign data_register_inb		= (state == STATE_RECV_DATA) ? i2c_sda : 1'b0;
 	assign data_register_ins 		= {address, rw, data};
 
-	assign bytesend_register_shift 	= ((state == STATE_ACK_DATA));
+	assign bytesend_register_shift 	= ((state == STATE_FINI_DATA));
 	assign bytesend_register_load 	= ((state == STATE_INIT));
 
 
@@ -166,11 +171,15 @@ module I2C_Controller(clock, reset_n, init_transaction, rw, address, data, bytes
 	assign i2c_sda_driver_in 		= (state == STATE_INIT) ? 1'b0 :
 										(((state == STATE_SEND_ADDR) |
 										  (state == STATE_SEND_DATA) |
+										  (state == STATE_RW)		 |
 										  (state == STATE_RECV_DATA)) ? data_register_outb : 1'b1);
 
 	assign i2c_scl_driver_en		= ((state != STATE_IDLE) &
 									   (state != STATE_INIT) &
 									   (state != STATE_STOP));
+
+	assign debug_signal = (state_n == STATE_ACK_ADDR) | (state_n == STATE_ACK_DATA) | (state == STATE_ACK_ADDR) | (state == STATE_ACK_DATA);
+	assign debug_send = (state == STATE_SEND_DATA) | (state == STATE_RECV_DATA);
 
 
 	assign data_clk					= clk_det_out & ~i2c_scl_div_out;
