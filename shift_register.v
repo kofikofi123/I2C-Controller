@@ -36,7 +36,7 @@ module shift_register(clock, reset_n, load, shift, inb, outb, ins, out);
 
 	always @(*) begin
 		if (shift) outb_n = out[REGISTER_SIZE-1];
-		else outb_n = outb_n; //latch
+		else outb_n = outb; //latch
 	end
 
 endmodule
